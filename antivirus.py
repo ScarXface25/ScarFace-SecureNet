@@ -1,168 +1,201 @@
-import os
-import time
-import psutil
-import hashlib
-import shutil
-import random
-import json
-import ctypes
+import os, sys, time, psutil, hashlib, shutil, json, ctypes, random
 
-# ================= BASIC CONFIG =================
+# ================= AUTO ADMIN =================
 
-APP_NAME = "EndpointGuard"
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+if not is_admin():
+    ctypes.windll.shell32.ShellExecuteW(
+        None,"runas",sys.executable," ".join(sys.argv),None,1
+    )
+    sys.exit()
+
+# ================= CONFIG =================
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-SCAN_INTERVAL = 10  # testing ke liye fast, baad mein 60 kar sakte ho
+SCAN_INTERVAL = 5
 
-QUARANTINE_DIR = os.path.join(BASE_DIR, "quarantine")
-BLOCKLIST_FILE = os.path.join(BASE_DIR, "blocked_hashes.txt")
-SIEM_FILE = os.path.join(BASE_DIR, "siem_events.json")
-LOG_FILE = os.path.join(BASE_DIR, "security_events.log")
+QUARANTINE_DIR = os.path.join(BASE_DIR,"quarantine")
+META_FILE = os.path.join(BASE_DIR,"quarantine_meta.json")
+BLOCKLIST_FILE = os.path.join(BASE_DIR,"blocked_hashes.txt")
+SIEM_FILE = os.path.join(BASE_DIR,"siem_events.json")
+LOG_FILE = os.path.join(BASE_DIR,"security_events.log")
 
-SYSTEM_PATHS = [
-    "c:\\windows",
-    "c:\\program files",
-    "c:\\program files (x86)"
+SYSTEM_IGNORE={"registry","memcompression","system","idle"}
+SECURITY_SOFTWARE={"msmpeng.exe","mpdefendercoreservice.exe"}
+TRUSTED={"python.exe","pythonw.exe","py.exe"}
+
+DANGEROUS_ZONES=[
+    os.environ["TEMP"].lower(),
+    os.environ["USERPROFILE"].lower(),
+    "c:\\users"
 ]
 
-USER_PATHS = [
-    os.path.expandvars(r"%USERPROFILE%").lower(),
-    os.path.expandvars(r"%TEMP%").lower()
-]
+# ================= META =================
 
-# ✅ TRUST MODEL (FALSE POSITIVE FIX)
-TRUSTED_EXECUTABLES = [
-    "python.exe",
-    "pythonw.exe"
-]
+def load_meta():
+    if os.path.exists(META_FILE):
+        with open(META_FILE) as f:
+            return json.load(f)
+    return {}
+
+META = load_meta()
+
+def save_meta():
+    with open(META_FILE,"w") as f:
+        json.dump(META,f)
 
 # ================= UTILS =================
 
-def log(msg):
-    print(msg)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{time.ctime()}] {msg}\n")
+def log(m):
+    print(m)
+    with open(LOG_FILE,"a",encoding="utf-8") as f:
+        f.write(f"[{time.ctime()}] {m}\n")
 
-def file_hash(path):
+def file_hash(p):
     try:
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            h.update(f.read())
+        h=hashlib.sha256()
+        with open(p,"rb") as f:
+            for c in iter(lambda:f.read(8192),b""):
+                h.update(c)
         return h.hexdigest()
     except:
         return None
 
-def is_system_path(path):
-    path = path.lower()
-    return any(path.startswith(p) for p in SYSTEM_PATHS)
+def risky(p):
+    p=p.lower()
+    return any(p.startswith(x) for x in DANGEROUS_ZONES)
 
-def is_user_path(path):
-    path = path.lower()
-    return any(path.startswith(p) for p in USER_PATHS)
-
-# ================= BLOCKED HASHES =================
+# ================= BLOCKED =================
 
 def load_blocked():
     if os.path.exists(BLOCKLIST_FILE):
-        with open(BLOCKLIST_FILE, "r", encoding="utf-8") as f:
-            return set(line.strip() for line in f if line.strip())
+        with open(BLOCKLIST_FILE) as f:
+            return set(x.strip() for x in f if x.strip())
     return set()
 
-def save_blocked(h):
-    with open(BLOCKLIST_FILE, "a", encoding="utf-8") as f:
-        f.write(h + "\n")
+BLOCKED_HASHES=load_blocked()
 
-BLOCKED_HASHES = load_blocked()
+def save_blocked(h):
+    with open(BLOCKLIST_FILE,"a") as f:
+        f.write(h+"\n")
 
 # ================= SIEM =================
 
-def siem_event(event_type, details):
-    record = {
-        "time": time.time(),
-        "event": event_type,
-        "details": details
-    }
-    with open(SIEM_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+def siem(event,data):
+    with open(SIEM_FILE,"a") as f:
+        f.write(json.dumps({
+            "time":time.time(),
+            "event":event,
+            "details":data
+        })+"\n")
 
-# ================= QUARANTINE =================
+# ================= QUARANTINE (FIXED) =================
 
 def quarantine(path):
     try:
         if not os.path.exists(path):
             return
 
-        h = file_hash(path)
+        os.makedirs(QUARANTINE_DIR,exist_ok=True)
+
+        name=os.path.basename(path)
+        dest=os.path.join(QUARANTINE_DIR,name)
+
+        shutil.copy2(path,dest)
+        os.remove(path)
+
+        META[name]=path   # 🔥 ORIGINAL LOCATION SAVED
+        save_meta()
+
+        h=file_hash(dest)
         if h and h not in BLOCKED_HASHES:
             BLOCKED_HASHES.add(h)
             save_blocked(h)
 
-        os.makedirs(QUARANTINE_DIR, exist_ok=True)
-        shutil.move(path, os.path.join(QUARANTINE_DIR, os.path.basename(path)))
-
-        log(f"[QUARANTINE] {path}")
-        siem_event("quarantine", {"file": path})
+        log(f"[QUARANTINED] {path}")
+        siem("quarantine",path)
 
     except Exception as e:
-        log(f"[ERROR] Quarantine failed: {e}")
+        log(f"[QUARANTINE ERROR] {e}")
 
-# ================= PROCESS SCAN =================
+# ================= RESTORE (REAL) =================
 
-def scan_processes():
-    for proc in psutil.process_iter(['pid', 'exe', 'name']):
+def restore_file(name):
+    if name not in META:
+        return
+
+    src=os.path.join(QUARANTINE_DIR,name)
+    dst=META[name]
+
+    if os.path.exists(src):
+        os.makedirs(os.path.dirname(dst),exist_ok=True)
+        shutil.move(src,dst)
+
+        META.pop(name)
+        save_meta()
+
+        log(f"[RESTORED] {dst}")
+        siem("restore",dst)
+
+# ================= PROCESS KILL =================
+
+def kill(proc):
+    try:
+        proc.terminate()
+        time.sleep(0.5)
+        if proc.is_running():
+            proc.kill()
+    except:
+        pass
+
+# ================= CORE ENGINE =================
+
+def scan():
+    for proc in psutil.process_iter(['pid','exe','name']):
         try:
-            exe = proc.info['exe']
-            name = proc.info['name']
+            exe=proc.info['exe']
+            name=(proc.info['name'] or "").lower()
 
             if not exe:
                 continue
 
-            exe_l = exe.lower()
-            exe_name = os.path.basename(exe_l)
-
-            # ✅ Ignore trusted executables (false positive fix)
-            if exe_name in TRUSTED_EXECUTABLES:
+            if name in SYSTEM_IGNORE:
                 continue
 
-            # Block already known bad hash
-            h = file_hash(exe)
+            if name in SECURITY_SOFTWARE or name in TRUSTED:
+                continue
+
+            h=file_hash(exe)
+
             if h in BLOCKED_HASHES:
-                proc.kill()
                 quarantine(exe)
+                kill(proc)
                 continue
 
-            # User-folder execution heuristic
-            if is_user_path(exe_l) and not is_system_path(exe_l):
-                log(f"[SUSPICIOUS EXEC] {exe}")
-                proc.kill()
+            if risky(exe):
                 quarantine(exe)
+                kill(proc)
 
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except:
             pass
-        except Exception as e:
-            log(f"[ERROR] Scan issue: {e}")
 
-# ================= MAIN LOOP =================
+# ================= MAIN =================
 
 def monitor():
-    log("=== EndpointGuard Backend STARTED (DEBUG MODE) ===")
-    try:
-        admin = ctypes.windll.shell32.IsUserAnAdmin()
-    except:
-        admin = 0
-
-    log(f"Running as admin: {admin}")
+    log("=== EndpointGuard REAL ANTIVIRUS MODE ===")
 
     while True:
-        try:
-            scan_processes()
-            time.sleep(SCAN_INTERVAL + random.randint(0, 3))
-        except Exception as e:
-            log(f"[CRASH RECOVERED] {e}")
+        scan()
+        time.sleep(SCAN_INTERVAL+random.randint(0,2))
 
-# ================= ENTRY =================
-
-if __name__ == "__main__":
-    print(">>> FILE LOADED <<<")
-    input(">>> PRESS ENTER TO START ENGINE <<<")
+if __name__=="__main__":
     monitor()
+if __name__ == "__main__":
+    monitor()
+    input("Press Enter to exit...")

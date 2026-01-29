@@ -1,239 +1,259 @@
-import os
-import json
-import time
-import hashlib
-import tkinter as tk
-from tkinter import ttk
-import shutil
-import threading
-
-# ================= PATHS =================
+import os, json, stat, time, tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-SIEM_FILE = os.path.join(BASE_DIR, "siem_events.json")
 QUARANTINE_DIR = os.path.join(BASE_DIR, "quarantine")
-BLOCKLIST_FILE = os.path.join(BASE_DIR, "blocked_hashes.txt")
+META_FILE = os.path.join(BASE_DIR, "quarantine_meta.json")
+LOG_FILE = os.path.join(BASE_DIR, "security_events.log")
 
-SCAN_PATHS = [
-    os.path.expandvars(r"%USERPROFILE%"),
-    os.path.expandvars(r"%TEMP%"),
+BG="#0f172a"
+PANEL="#1e293b"
+TEXT="#e5e7eb"
+BTN="#22c55e"
+DANGER="#ef4444"
+
+SCAN_TARGETS = [
+    os.path.expanduser("~/Desktop"),
+    os.path.expanduser("~/Downloads"),
+    os.path.expanduser("~/Documents"),
+    os.environ["TEMP"]
 ]
 
-SUSPICIOUS_EXT = (".exe", ".dll", ".ps1", ".bat", ".vbs")
+# ---------------- META ----------------
 
-# ================= UTILS =================
+def load_meta():
+    if os.path.exists(META_FILE):
+        with open(META_FILE) as f:
+            return json.load(f)
+    return {}
 
-def load_blocked_hashes():
-    if os.path.exists(BLOCKLIST_FILE):
-        with open(BLOCKLIST_FILE, "r", encoding="utf-8") as f:
-            return set(line.strip() for line in f if line.strip())
-    return set()
+def save_meta(meta):
+    with open(META_FILE,"w") as f:
+        json.dump(meta,f)
 
-def file_hash(path):
-    try:
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except:
-        return None
+# ---------------- UI ----------------
 
-def load_siem_events(limit=50):
-    events = []
-    if os.path.exists(SIEM_FILE):
-        with open(SIEM_FILE, "r", encoding="utf-8") as f:
-            for line in f.readlines()[-limit:]:
-                try:
-                    events.append(json.loads(line))
-                except:
-                    pass
-    return events
+class AntivirusUI:
+    def __init__(self, root):
+        root.title("Scarface Securenet")
+        root.geometry("1100x700")
+        root.configure(bg=BG)
 
-def list_quarantine():
-    if not os.path.exists(QUARANTINE_DIR):
-        return []
-    return os.listdir(QUARANTINE_DIR)
+        root.grid_rowconfigure(1, weight=1)
+        root.grid_columnconfigure(1, weight=1)
 
-# ================= GUI APP =================
+        self.header()
+        self.sidebar()
 
-class EndpointGuardApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Endpoint Guard – Security Dashboard")
-        self.geometry("900x550")
-        self.resizable(False, False)
+        self.container = tk.Frame(root,bg=BG)
+        self.container.grid(row=1,column=1,sticky="nsew")
 
-        self.blocked_hashes = load_blocked_hashes()
+        self.show_home()
 
-        self.create_widgets()
-        self.refresh_all()
+    # ---------------- LAYOUT ----------------
 
-    # ---------- UI ----------
+    def header(self):
+        tk.Label(root,text="🛡 Scarface Securenet",
+                 bg=BG,fg="white",
+                 font=("Arial",22,"bold")).grid(row=0,column=0,columnspan=2,sticky="w",padx=15)
 
-    def create_widgets(self):
-        header = tk.Label(
-            self,
-            text="Endpoint Guard – EDR Dashboard",
-            font=("Segoe UI", 16, "bold")
-        )
-        header.pack(pady=10)
+    def sidebar(self):
+        side=tk.Frame(root,bg=PANEL)
+        side.grid(row=1,column=0,sticky="ns")
 
-        self.status_label = tk.Label(
-            self,
-            text="Status: 🟢 Backend Running",
-            font=("Segoe UI", 11),
-            fg="green"
-        )
-        self.status_label.pack(pady=5)
+        for t,f in [
+            ("Home",self.show_home),
+            ("Manual Scan",self.show_scan),
+            ("Quarantine",self.show_quarantine),
+            ("Logs",self.show_logs)
+        ]:
+            tk.Button(side,text=t,command=f,
+                      bg="#334155",fg=TEXT,relief="flat",
+                      font=("Arial",11)
+                      ).pack(fill="x",pady=4,ipady=10)
 
-        tabs = ttk.Notebook(self)
-        tabs.pack(expand=True, fill="both", padx=10, pady=10)
+    def clear(self):
+        for w in self.container.winfo_children():
+            w.destroy()
 
-        # ---- Events ----
-        self.events_frame = ttk.Frame(tabs)
-        tabs.add(self.events_frame, text="Security Events")
+    # ---------------- HOME ----------------
 
-        self.events_box = tk.Text(
-            self.events_frame,
-            height=15,
-            state="disabled",
-            font=("Consolas", 10)
-        )
-        self.events_box.pack(expand=True, fill="both", padx=5, pady=5)
+    def show_home(self):
+        self.clear()
+        tk.Label(self.container,text="🟢 PROTECTION ACTIVE",
+                 fg=BTN,bg=BG,
+                 font=("Arial",34,"bold")).pack(expand=True)
 
-        # ---- Quarantine ----
-        self.quarantine_frame = ttk.Frame(tabs)
-        tabs.add(self.quarantine_frame, text="Quarantine")
+    # ---------------- MANUAL SCAN ----------------
 
-        self.quarantine_list = tk.Listbox(
-            self.quarantine_frame,
-            font=("Consolas", 10)
-        )
-        self.quarantine_list.pack(expand=True, fill="both", padx=5, pady=5)
+    def show_scan(self):
+        self.clear()
 
-        # ---- Manual Scan ----
-        self.scan_frame = ttk.Frame(tabs)
-        tabs.add(self.scan_frame, text="Manual Scan")
+        tk.Label(self.container,text="Manual System Scan",
+                 fg="white",bg=BG,
+                 font=("Arial",20,"bold")).pack(pady=15)
 
-        self.scan_output = tk.Text(
-            self.scan_frame,
-            height=15,
-            state="disabled",
-            font=("Consolas", 10)
-        )
-        self.scan_output.pack(expand=True, fill="both", padx=5, pady=5)
+        self.progress = ttk.Progressbar(self.container)
+        self.progress.pack(fill="x",padx=40,pady=15)
 
-        # ---- Buttons ----
-        btn_frame = tk.Frame(self)
-        btn_frame.pack(pady=10)
+        self.counter = tk.Label(self.container,text="Waiting...",
+                                fg=TEXT,bg=BG,font=("Arial",12))
+        self.counter.pack()
 
-        tk.Button(
-            btn_frame, text="🔍 Manual Scan",
-            width=18, command=self.start_manual_scan
-        ).pack(side="left", padx=10)
+        tk.Button(self.container,text="Start Full Scan",
+                  bg=BTN,font=("Arial",12),
+                  command=self.start_scan).pack(pady=25)
 
-        tk.Button(
-            btn_frame, text="🔄 Refresh",
-            width=15, command=self.refresh_all
-        ).pack(side="left", padx=10)
+    def collect_files(self):
+        files=[]
+        for folder in SCAN_TARGETS:
+            for root,_,fs in os.walk(folder):
+                for f in fs:
+                    files.append(os.path.join(root,f))
+        return files
 
-        tk.Button(
-            btn_frame, text="❌ Exit",
-            width=15, command=self.destroy
-        ).pack(side="left", padx=10)
+    def start_scan(self):
+        files=self.collect_files()
+        total=len(files)
 
-    # ---------- Thread-safe UI log ----------
+        if total==0:
+            messagebox.showinfo("Scan","No files found")
+            return
 
-    def ui_log(self, text):
-        self.scan_output.after(
-            0, lambda: self.scan_output.insert(tk.END, text)
-        )
+        self.progress["maximum"]=total
 
-    # ---------- Refresh ----------
+        for i,_ in enumerate(files,1):
+            self.progress["value"]=i
+            self.counter.config(text=f"Scanned {i} / {total} files")
+            root.update()
 
-    def refresh_all(self):
-        self.refresh_events()
-        self.refresh_quarantine()
+        messagebox.showinfo("Scan","Full system scan completed")
 
-    def refresh_events(self):
-        events = load_siem_events()
-        self.events_box.config(state="normal")
-        self.events_box.delete("1.0", tk.END)
+    # ---------------- QUARANTINE ----------------
 
-        if not events:
-            self.events_box.insert(tk.END, "No security events recorded.\n")
-        else:
-            for e in events:
-                ts = e.get("timestamp") or time.time()
-                etype = e.get("event_type") or "unknown"
-                self.events_box.insert(
-                    tk.END,
-                    f"[{time.ctime(ts)}] {etype} → {e.get('details')}\n"
-                )
+    def show_quarantine(self):
+        self.clear()
 
-        self.events_box.config(state="disabled")
+        tk.Label(self.container,text="Quarantine",
+                 fg="white",bg=BG,
+                 font=("Arial",20,"bold")).pack(pady=10)
 
-    def refresh_quarantine(self):
-        self.quarantine_list.delete(0, tk.END)
-        files = list_quarantine()
-        if not files:
-            self.quarantine_list.insert(tk.END, "No quarantined files.")
-        else:
-            for f in files:
-                self.quarantine_list.insert(tk.END, f)
+        self.q_list=tk.Listbox(self.container,bg="#020617",fg=TEXT)
+        self.q_list.pack(fill="both",expand=True,padx=30,pady=15)
 
-    # ---------- Manual Scan Thread ----------
+        if os.path.exists(QUARANTINE_DIR):
+            for f in os.listdir(QUARANTINE_DIR):
+                self.q_list.insert(tk.END,f)
 
-    def start_manual_scan(self):
-        t = threading.Thread(target=self.manual_scan, daemon=True)
-        t.start()
+        btns=tk.Frame(self.container,bg=BG)
+        btns.pack()
 
-    def manual_scan(self):
-        self.scan_output.after(0, lambda: self.scan_output.config(state="normal"))
-        self.scan_output.after(0, lambda: self.scan_output.delete("1.0", tk.END))
-        self.ui_log("🔍 Manual scan started...\n\n")
+        tk.Button(btns,text="Restore",
+                  bg="#38bdf8",
+                  command=self.restore_file).pack(side="left",padx=10)
 
-        scanned = 0
-        removed = 0
+        tk.Button(btns,text="Delete",
+                  bg=DANGER,
+                  command=self.delete_file).pack(side="left",padx=10)
 
-        for base in SCAN_PATHS:
-            if not os.path.exists(base):
-                continue
+    def restore_file(self):
+        if not self.q_list.curselection():
+            return
 
-            for root, _, files in os.walk(base):
-                for name in files:
-                    if not name.lower().endswith(SUSPICIOUS_EXT):
-                        continue
+        name=self.q_list.get(self.q_list.curselection()[0])
+        meta=load_meta()
 
-                    path = os.path.join(root, name)
-                    scanned += 1
+        if name not in meta:
+            messagebox.showerror("Error","Original path not found")
+            return
 
-                    try:
-                        h = file_hash(path)
-                        if h and h in self.blocked_hashes:
-                            os.makedirs(QUARANTINE_DIR, exist_ok=True)
-                            shutil.move(path, os.path.join(QUARANTINE_DIR, name))
-                            self.ui_log(f"❌ Removed: {path}\n")
-                            removed += 1
-                    except:
-                        continue
+        src=os.path.join(QUARANTINE_DIR,name)
+        dst=meta[name]
 
-        if removed == 0:
-            self.ui_log(
-                f"\n✅ Scan complete\nFiles scanned: {scanned}\nNo threats found.\n"
-            )
-        else:
-            self.ui_log(
-                f"\n🧪 Scan complete\nFiles scanned: {scanned}\nThreats removed: {removed}\n"
+        try:
+            os.makedirs(os.path.dirname(dst),exist_ok=True)
+            os.rename(src,dst)
+            meta.pop(name)
+            save_meta(meta)
+
+            messagebox.showinfo("Restored",f"Restored to:\n{dst}")
+            self.show_quarantine()
+
+        except Exception as e:
+            messagebox.showerror("Restore failed",str(e))
+
+    def delete_file(self):
+        if not self.q_list.curselection():
+            return
+
+        name=self.q_list.get(self.q_list.curselection()[0])
+        path=os.path.join(QUARANTINE_DIR,name)
+
+        if not os.path.exists(path):
+            messagebox.showerror("Error","File not found")
+            return
+
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            time.sleep(0.2)
+            os.remove(path)
+
+            meta=load_meta()
+            meta.pop(name,None)
+            save_meta(meta)
+
+            messagebox.showinfo("Deleted",f"{name} permanently removed")
+            self.show_quarantine()
+
+        except PermissionError:
+            messagebox.showerror(
+                "File Locked",
+                "Antivirus engine is protecting this file.\nClose backend and try again."
             )
 
-        self.scan_output.after(0, lambda: self.scan_output.config(state="disabled"))
-        self.refresh_quarantine()
+        except Exception as e:
+            messagebox.showerror("Delete failed",str(e))
 
-# ================= RUN =================
+    # ---------------- LOG VIEWER (FIXED PROFESSIONAL) ----------------
 
-if __name__ == "__main__":
-    app = EndpointGuardApp()
-    app.mainloop()
+    def show_logs(self):
+        self.clear()
+
+        tk.Label(self.container,text="Security Logs",
+                 fg="white",bg=BG,font=("Arial",20,"bold")).pack(pady=5)
+
+        self.log_reader = scrolledtext.ScrolledText(
+            self.container,
+            wrap=tk.WORD,
+            bg="#020617",
+            fg=TEXT,
+            insertbackground="white",
+            font=("Consolas",11)
+        )
+
+        self.log_reader.pack(fill="both",expand=True,padx=25,pady=15)
+
+        self.log_reader.configure(state="normal")
+
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE) as f:
+                for line in f:
+                    self.log_reader.insert(tk.END, line)
+
+        self.log_reader.configure(state="disabled")  # read-only
+
+        # Enable text cursor (reader mode)
+        self.log_reader.config(cursor="xterm")
+
+        tk.Label(self.container,
+                 text="Tip: Select text and press Ctrl+C to copy",
+                 bg=BG,fg="#94a3b8").pack(pady=5)
+
+
+# ---------------- RUN ----------------
+
+if __name__=="__main__":
+    root=tk.Tk()
+    AntivirusUI(root)
+    root.mainloop()
